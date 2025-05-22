@@ -1,25 +1,28 @@
-Refactored Plan to Implement "Custom Agent Nodes" Feature
+Refactored Plan to Implement "Custom Agent Nodes" Feature (v2 - Automatic Provisioning)
 
-Core Principle: The presence of a non-empty `custom_agent_nodepools` list in the user's `kube.tf` will implicitly activate the "multicloud agents" feature, enforcing WireGuard for CNI communication.
+Core Principle: The presence of a non-empty `custom_agent_nodepools` list in the user's `kube.tf` will implicitly activate the "multicloud agents" feature, enforcing WireGuard for CNI communication. **Terraform will automatically provision these custom agent nodes via SSH.**
 
 I. Introduce New Terraform Variables (in `variables.tf`)
 
 1.  `custom_agent_nodepools`:
     *   Type: `list(object({ ... }))`
     *   Default: `[]`
-    *   Description: "A list of objects defining pre-existing custom agent nodes to be integrated into the cluster. Defining this list automatically enables multicloud agent mode. Terraform will output configuration and installation scripts for these nodes."
+    *   Description: "A list of objects defining pre-existing custom agent nodes to be **automatically provisioned and integrated** into the cluster. Defining this list automatically enables multicloud agent mode."
     *   Object attributes:
         *   `name`: (string, required) A unique name for the custom agent (e.g., "my-external-server").
         *   `external_ip`: (string, required) The public IP address of the custom agent machine.
-        *   `ssh_user`: (string, optional, e.g., "ubuntu") The SSH user for the custom machine (for user instructions).
-        *   `ssh_port`: (number, optional, default: 22) The SSH port for the custom machine (for user instructions).
+        *   `ssh_user`: (string, required, e.g., "ubuntu", "root") The SSH user for Terraform to connect to the custom machine for provisioning.
+        *   `ssh_port`: (number, optional, default: 22) The SSH port for Terraform to connect to the custom machine.
+        *   `ssh_private_key_path`: (string, optional, default: null) Path to an SSH private key specifically for this custom agent. If set, this key will be used. Takes precedence over global SSH settings for this node.
+        *   `ssh_use_agent`: (bool, optional, default: null) Explicitly enable/disable SSH agent for this custom node. If null, behavior depends on `ssh_private_key_path` and global `var.ssh_private_key` / `local.ssh_agent_identity`.
         *   `labels`: (list(string), optional) K3s node labels.
         *   `taints`: (list(string), optional) K3s node taints.
+        *   `os_type`: (string, optional, default: "linux_debian_ubuntu") Hint for OS type to determine package manager commands for prerequisites (e.g., "linux_debian_ubuntu", "linux_rhel_centos"). Defaults to assuming apt for `wireguard-tools`.
 
 2.  `wireguard_udp_port`:
     *   Type: `number`
     *   Default: `51820`
-    *   Description: "The UDP port for WireGuard tunnels used by Flannel, Calico, or Cilium. This port is automatically opened on Hetzner firewalls when `custom_agent_nodepools` is defined or `enable_wireguard` is true. Users must ensure this port is open on their custom agents."
+    *   Description: "The UDP port for WireGuard tunnels used by Flannel, Calico, or Cilium. This port is automatically opened on Hetzner firewalls when `custom_agent_nodepools` is defined or `enable_wireguard` is true. Users must ensure this port is open on their custom agents' firewalls (Terraform will not manage the custom agent's firewall)."
 
 II. Modify `locals.tf`
 
@@ -57,7 +60,7 @@ II. Modify `locals.tf`
           flannel-backend        = local.force_wireguard_for_cni ? "wireguard-native" : "vxlan"
         }
         ```
-        *   If `local.enable_multicloud_agents` is true, CP K3s args/config: Add `flannel-external-ip = ""`.
+        *   If `local.enable_multicloud_agents` is true, CP K3s args/config: Add `flannel-external-ip = true`.
 
     *   **Calico (`calico_values` or direct kustomize patch for `calico-node` DaemonSet)**:
         *   The existing logic that sets `FELIX_WIREGUARDENABLED` to `true` based on `var.enable_wireguard` will be extended to trigger if `local.force_wireguard_for_cni` is true.
@@ -118,43 +121,70 @@ IV. Modify `agents.tf`
 
 *   The `k3s_agent_config` for Hetzner agents will incorporate `node-external-ip` and the correct `server` URL when `local.enable_multicloud_agents` is true.
 
-V. Create `custom_agents_outputs.tf` (New File)
+V. Create `custom_agent_provisioning.tf` (New File or integrated into existing structure, e.g., `agents.tf` or a new module)
 
-*   Output `custom_agent_configurations` containing `config_yaml_content`, `install_script`, and detailed user instructions for each custom agent node.
+*   This file will contain `null_resource` definitions to provision each custom agent.
+*   For each `agent` in `var.custom_agent_nodepools` (iterating with `for_each = { for idx, agent in var.custom_agent_nodepools : agent.name => agent }` to use `agent.name` as key):
+    *   A `null_resource` named `provision_custom_agent_${each.key}`.
+    *   `triggers`: Include `local.k3s_custom_agent_config_map[each.key]`, `local.k3s_custom_agent_install_script_map[each.key]`, `local.control_plane_external_api_endpoint`, `local.k3s_token` to re-run provisioning if these change.
+    *   `connection` block:
+        *   `type`: "ssh"
+        *   `host`: `each.value.external_ip`
+        *   `user`: `each.value.ssh_user`
+        *   `port`: `coalesce(each.value.ssh_port, 22)`
+        *   `private_key`: `each.value.ssh_private_key_path != null ? file(each.value.ssh_private_key_path) : (var.ssh_private_key != "" && !coalesce(each.value.ssh_use_agent, local.ssh_agent_identity != null) ? var.ssh_private_key : null)`
+        *   `agent_identity`: `coalesce(each.value.ssh_use_agent, local.ssh_agent_identity != null) ? (each.value.ssh_private_key_path != null ? file(each.value.ssh_private_key_path) : local.ssh_agent_identity) : null` (Note: `local.ssh_agent_identity` uses `var.ssh_public_key` as identity if `var.ssh_private_key` is null).
+        *   `timeout`: e.g., "5m"
+    *   `provisioner "remote-exec"` (Install prerequisites like WireGuard tools):
+        *   `inline`: Script based on `each.value.os_type`.
+          ```bash
+          # Example for Debian/Ubuntu
+          if [ "${each.value.os_type}" = "linux_debian_ubuntu" ]; then
+            if ! dpkg -s wireguard-tools > /dev/null 2>&1; then
+              echo "Installing wireguard-tools..."
+              sudo apt-get update -y && sudo apt-get install -y wireguard-tools
+            fi
+          elif [ "${each.value.os_type}" = "linux_rhel_centos" ]; then
+            if ! rpm -q wireguard-tools > /dev/null 2>&1; then
+              echo "Installing wireguard-tools..."
+              sudo yum install -y epel-release && sudo yum install -y wireguard-tools # Example, might need adjustment
+            fi
+          else
+            echo "Skipping prerequisite installation for unknown OS type: ${each.value.os_type}"
+          fi
+          ```
+    *   `provisioner "remote-exec"` (Create K3s directory):
+        *   `inline`: `["sudo mkdir -p /etc/rancher/k3s"]`
+    *   `provisioner "file"` (Upload `config.yaml`):
+        *   `content`: `local.k3s_custom_agent_config_map[each.key]`
+        *   `destination`: "/tmp/config.yaml"
+    *   `provisioner "remote-exec"` (Move config and set permissions):
+        *   `inline`: `["sudo mv /tmp/config.yaml /etc/rancher/k3s/config.yaml", "sudo chmod 0600 /etc/rancher/k3s/config.yaml"]`
+    *   `provisioner "remote-exec"` (Run K3s install script):
+        *   `inline`: `[local.k3s_custom_agent_install_script_map[each.key]]`
+    *   `provisioner "remote-exec"` (Enable and start K3s agent):
+        *   `inline`: `["sudo systemctl enable --now k3s-agent"]`
+    *   `depends_on`: Should include `null_resource.control_planes` from `control_planes.tf` (or a similar signal that control planes are ready and LB IP is available if used for the endpoint).
+
+VI. Modify `custom_agents_outputs.tf`
+
+*   The `custom_agent_configurations` output will be renamed and revised (as per previous plan v2 update).
     ```terraform
-    output "custom_agent_configurations" {
-      description = "Provides the k3s agent configuration and installation script for each custom agent node. Apply these on your external machines."
+    output "custom_agent_provisioning_status" {
+      description = "Status of automatic provisioning attempts for custom agent nodes. Check K3s agent logs on custom nodes for detailed status."
       value = {
-        for name, agent_details in var.custom_agent_nodepools : name => {
-          config_yaml_content = local.k3s_custom_agent_config_map[name]
-          install_script      = local.k3s_custom_agent_install_script_map[name]
-          instructions        = <<-EOT
-            To provision custom agent '${name}' (IP: ${agent_details.external_ip}):
-            1. SSH into your custom machine (e.g., ssh ${coalesce(agent_details.ssh_user, "root")}@${agent_details.external_ip} -p ${coalesce(agent_details.ssh_port, 22)}).
-            2. Ensure the WireGuard UDP port ${var.wireguard_udp_port} (default 51820) is open for inbound traffic on this machine's firewall.
-            3. If using Calico or Cilium CNI, ensure WireGuard tools (e.g., `wireguard-tools` package) are installed.
-            4. Create the k3s configuration directory: sudo mkdir -p /etc/rancher/k3s
-            5. Create the configuration file: sudo nano /etc/rancher/k3s/config.yaml
-               Paste the following content into the file:
-               ---
-               ${local.k3s_custom_agent_config_map[name]}
-               ---
-            6. Set correct permissions: sudo chmod 0600 /etc/rancher/k3s/config.yaml
-            7. Run the installation script:
-               ${local.k3s_custom_agent_install_script_map[name]}
-            8. Start the k3s agent: sudo systemctl enable --now k3s-agent
-            9. Verify the node joins the cluster: On a control plane or machine with kubectl, run 'kubectl get nodes'.
-          EOT
+        for agent_details in var.custom_agent_nodepools : agent_details.name => {
+          external_ip         = agent_details.external_ip
+          provisioning_result = "Terraform attempted automatic provisioning. Verify node status with 'kubectl get nodes' and check agent logs on the custom machine if issues persist."
+          config_yaml_content_for_debug = sensitive(local.k3s_custom_agent_config_map[agent_details.name]) # For debugging
+          install_script_for_debug      = sensitive(local.k3s_custom_agent_install_script_map[agent_details.name]) # For debugging
         }
       }
-      sensitive = true # k3s_token
-      depends_on = [
-        null_resource.control_planes # Ensure CPs are up and LB IP is available if used for endpoint
-      ]
+      sensitive = true
     }
     ```
 
-VI. Modify `main.tf` (Firewall Rules in `locals.tf`)
+VII. Modify `main.tf` (Firewall Rules in `locals.tf`)
 
 *   In `local.base_firewall_rules`, the rule for WireGuard UDP port is modified:
     ```terraform
@@ -173,82 +203,46 @@ VI. Modify `main.tf` (Firewall Rules in `locals.tf`)
     # (rest of firewall rules)
     ```
 
-VII. Update `kube.tf.example`
+VIII. Update `kube.tf.example`
 
-*   Add the `custom_agent_nodepools` variable with an example.
-*   Add the `wireguard_udp_port` variable, commented out, showing its default value (51820).
-*   Add comments explaining:
-    *   Defining `custom_agent_nodepools` automatically enables multicloud mode and enforces secure CNI communication (using WireGuard) for all nodes.
-    *   How the `control_plane_external_api_endpoint` is determined for external agents (uses LB public IP if `use_control_plane_lb=true`, else first CP public IP; `kubeconfig_server_address` can be used as an override).
-    *   The `wireguard_udp_port` (default 51820) will be opened on Hetzner firewalls; users must open this on their custom agents' firewalls.
-    *   For Cilium CNI: If `custom_agent_nodepools` is defined, `routingMode` will be forced to "tunnel" and WireGuard encryption will be enabled, irrespective of `var.cilium_routing_mode` or `var.enable_wireguard` settings.
+*   Update `custom_agent_nodepools` example to include `ssh_user` (as required) and demonstrate `ssh_port`, `ssh_private_key_path`, `ssh_use_agent`, `os_type`.
+*   Update comments to reflect automatic provisioning by Terraform and the need for SSH access from the Terraform host.
+*   Emphasize user responsibility for firewall rules on the custom agent machine itself.
 
-VIII. Update `README.md`
+IX. Update `README.md`
 
-*   New section "Custom Agent Nodes (Multicloud)".
-*   Explain that the feature is enabled by defining `custom_agent_nodepools`.
-*   Detail how WireGuard is implicitly enabled for CNI for all nodes when this feature is active.
-*   Detail how the `control_plane_external_api_endpoint` is derived and how `var.kubeconfig_server_address` can influence it.
-*   Reiterate networking implications (public CP API, all k3s CNI traffic over external IPs/tunnels, WireGuard UDP port firewall requirements for *all* nodes including custom nodes).
-*   Mention the `wireguard_udp_port` variable and its default.
-*   Document the CNI-specific behaviors (Flannel `wireguard-native`, Calico `FELIX_WIREGUARDENABLED=true`, Cilium `routingMode="tunnel"` and WireGuard encryption forced).
-*   Reference `custom_agent_configurations` output for provisioning custom nodes.
+*   Update section "Custom Agent Nodes (Multicloud)".
+*   Explain that provisioning is now automatic via SSH.
+*   Detail SSH requirements (key, user, port, network path from Terraform host to custom agents).
+*   Explain `ssh_private_key_path`, `ssh_use_agent`, and `os_type` options.
+*   Stress that the user must ensure the custom agent's firewall permits WireGuard UDP traffic.
+*   Reference `custom_agent_provisioning_status` output.
 
-This updated plan makes the feature more secure by default and simplifies configuration by leveraging existing WireGuard capabilities and sensible defaults.
+X. Conceptual Flow Diagram (No significant change from previous plan v2 update with automatic provisioning)
 
-```terraform
-output "custom_agent_configurations" {
-  description = "Provides the k3s agent configuration and installation script for each custom agent node. Apply these on your external machines."
-  value = {
-    for name, agent_details in var.custom_agent_nodepools : name => {
-      config_yaml_content = local.k3s_custom_agent_config_map[name]
-      install_script      = local.k3s_custom_agent_install_script_map[name]
-      instructions        = <<-EOT
-        To provision custom agent '${name}' (IP: ${agent_details.external_ip}):
-        1. SSH into your custom machine (e.g., ssh ${coalesce(agent_details.ssh_user, "root")}@${agent_details.external_ip} -p ${coalesce(agent_details.ssh_port, 22)}).
-        2. Ensure the WireGuard UDP port ${var.wireguard_udp_port} (default 51820) is open for inbound traffic on this machine's firewall.
-        3. If using Calico or Cilium CNI, ensure WireGuard tools (e.g., `wireguard-tools` package) are installed.
-        4. Create the k3s configuration directory: sudo mkdir -p /etc/rancher/k3s
-        5. Create the configuration file: sudo nano /etc/rancher/k3s/config.yaml
-           Paste the following content into the file:
-           ---
-           ${local.k3s_custom_agent_config_map[name]}
-           ---
-        6. Set correct permissions: sudo chmod 0600 /etc/rancher/k3s/config.yaml
-        7. Run the installation script:
-           ${local.k3s_custom_agent_install_script_map[name]}
-        8. Start the k3s agent: sudo systemctl enable --now k3s-agent
-        9. Verify the node joins the cluster: On a control plane or machine with kubectl, run 'kubectl get nodes'.
-      EOT
-    }
-  }
-  sensitive = true # k3s_token
-  depends_on = [
-    null_resource.control_planes # Ensure CPs are up and LB IP is available if used for endpoint
-  ]
-}
-```
-
-## Conceptual Flow Diagram
+This refined plan provides more specific guidance on implementing automatic provisioning, drawing from existing patterns in the codebase while accommodating the unique aspects of pre-existing custom nodes.
 
 ```mermaid
 graph LR
-    A[User enables `enable_multicloud_agents` and defines `custom_agent_nodepools` in kube.tf] --> B{Terraform Plan/Apply};
+    A[User defines `custom_agent_nodepools` with SSH details in kube.tf] --> B{Terraform Plan/Apply};
 
     subgraph Terraform Execution
         B --> C1[Modifies CP k3s config: adds --node-external-ip, --flannel-external-ip];
         B --> C2[Modifies Hetzner Agent k3s config: sets server to Public LB IP, adds --node-external-ip];
-        B --> C3[Generates k3s config & install script for Custom Agents];
+        B --> C3[**Terraform SSHes to Custom Agents & Provisions K3s Agent**];
+        C3 --> C3a[Installs wireguard-tools];
+        C3 --> C3b[Creates /etc/rancher/k3s/config.yaml];
+        C3 --> C3c[Runs K3s install script];
+        C3 --> C3d[Starts k3s-agent service];
         B --> C4[Updates Hetzner Firewall: opens WireGuard UDP port];
     end
 
-    C3 --> D[Outputs Custom Agent config & script];
-    D --> E[User manually provisions Custom Agents using outputs];
+    C3 --> D[Outputs Custom Agent provisioning status];
 
     subgraph Kubernetes Cluster
         F[Hetzner Control Planes (Public IPs for k3s, Private for etcd)]
         G[Hetzner Agents (Public IPs for k3s)]
-        H[Custom Agents (Public IPs for k3s)]
+        H[Custom Agents (Public IPs for k3s, **provisioned by Terraform**)]
 
         F -- "k3s API (via Public LB IP)" --> G;
         F -- "k3s API (via Public LB IP)" --> H;
@@ -259,5 +253,5 @@ graph LR
 
     style A fill:#lightgrey,stroke:#333
     style B fill:#lightblue,stroke:#333
-    style E fill:#lightgreen,stroke:#333
+    style C3 fill:#lightgreen,stroke:#333
 ```
