@@ -59,6 +59,7 @@ To achieve this, we built up on the shoulders of giants by choosing [openSUSE Mi
 - [x] Possibility to toggle **Longhorn** and **Hetzner CSI**.
 - [x] Encryption at rest fully functional in both **Longhorn** and **Hetzner CSI**.
 - [x] Optional use of **Floating IPs** for use via Cilium's Egress Gateway.
+- [x] **Custom Agent Nodes (Multicloud)** support for integrating external nodes from other cloud providers.
 - [x] Proper IPv6 support for inbound/outbound traffic.
 - [x] **Flexible configuration options** via variables and an extra Kustomization option.
 
@@ -1020,9 +1021,79 @@ This setup is compatible with a loadbalancer for your control planes, however yo
 `control_plane_lb_enable_public_interface = false` to keep ip private.
 </details>
 
+<details>
+<summary>Custom Agent Nodes (Multicloud)</summary>
+
+This feature allows you to integrate external servers (from other cloud providers or on-premise) as agent nodes into your Kube-Hetzner cluster. Provisioning of these custom agent nodes is handled automatically by Terraform via SSH.
+
+**Activation:**
+
+The feature is activated by defining a non-empty `custom_agent_nodepools` list in your `kube.tf` file.
+
+**Key Requirements & Configuration:**
+
+*   **SSH Access:** Terraform requires SSH access to your custom agent machines to perform the installation. You'll need to provide:
+    *   `external_ip`: The public IP address of the custom agent.
+    *   `ssh_user`: The SSH user (e.g., `ubuntu`, `root`).
+    *   `ssh_port` (optional, default: 22): The SSH port.
+    *   `ssh_private_key_path` (optional): Path to a specific SSH private key for this node.
+    *   `ssh_use_agent` (optional): Explicitly enable/disable SSH agent for this node.
+*   **WireGuard:** When custom agents are used, WireGuard is automatically enforced for CNI communication to ensure secure and reliable networking between Hetzner nodes and external nodes.
+    *   `wireguard_udp_port` (default: 51820): This UDP port will be automatically opened on Hetzner firewalls.
+    *   **User Responsibility (Firewall):** You must ensure that your custom agent's firewall permits inbound UDP traffic on this `wireguard_udp_port` from the Hetzner Cloud nodes and other custom agents. Terraform will not manage the firewall rules on your custom agent machines.
+*   **User Responsibility (Prerequisites):** The user is responsible for installing necessary prerequisites on custom agent nodes. Most importantly, `wireguard-tools` (or its equivalent for the chosen OS, e.g., `wireguard-tools` on Debian/Ubuntu/RHEL/CentOS) must be installed manually to enable CNI communication.
+*   **Operating System (`os_type`):**
+    *   (Optional, default: "linux_debian_ubuntu") A hint for Terraform, primarily used for issuing warnings if `wireguard-tools` are detected as missing on supported OS types (e.g., "linux_debian_ubuntu", "linux_rhel_centos"). **Terraform will not automatically install any prerequisites.**
+*   **Node Configuration:**
+    *   `name`: A unique name for the custom agent.
+    *   `labels` (optional): K3s node labels.
+    *   `taints` (optional): K3s node taints.
+
+**How it Works:**
+
+1.  When `custom_agent_nodepools` is defined, Terraform identifies these external machines.
+2.  It establishes an SSH connection to each custom agent.
+3.  Terraform checks for the presence of `wireguard-tools` if a compatible `os_type` (e.g., "linux_debian_ubuntu", "linux_rhel_centos") is set. If missing, a warning will be issued during the provisioning process. **It is the user's responsibility to install `wireguard-tools` (or equivalent) manually on the custom agent node before or during provisioning.**
+4.  A K3s agent configuration file (`config.yaml`) is generated and uploaded, tailored for multicloud setup (using the public endpoint of your control plane, WireGuard for Flannel, etc.).
+5.  The K3s agent installation script is executed on the custom agent.
+6.  The k3s-agent service is enabled and started.
+
+**Output:**
+
+You can check the `custom_agent_provisioning_status` output from Terraform to see the status of the automatic provisioning attempts. For detailed troubleshooting, check the K3s agent logs on the custom agent machine itself (e.g., `journalctl -u k3s-agent`).
+
+Example `custom_agent_nodepools` in `kube.tf`:
+
+```tf
+custom_agent_nodepools = [
+  {
+    name                 = "my-aws-node"
+    external_ip          = "54.x.x.x"
+    ssh_user             = "ubuntu"
+    ssh_private_key_path = "~/.ssh/aws_key.pem" # Ensure Terraform can access this key
+    os_type              = "linux_debian_ubuntu"
+    labels               = ["topology.kubernetes.io/region=us-east-1", "workload=external"]
+    taints               = ["externalnode=true:NoSchedule"]
+  },
+  {
+    name        = "my-azure-node"
+    external_ip = "20.x.x.x"
+    ssh_user    = "azureuser"
+    # Assumes SSH agent forwarding or global private key for this node
+    os_type     = "linux_debian_ubuntu" # Or appropriate for your Azure VM's OS
+    labels      = ["topology.kubernetes.io/region=westeurope"]
+  }
+]
+
+# Ensure WireGuard port is open on your custom agents' firewalls
+# wireguard_udp_port = 51820 # Default, can be changed if needed
+```
+
+This setup enables a hybrid Kubernetes cluster, extending its reach beyond Hetzner Cloud while maintaining a consistent K3s environment.
+
+</details>
 
 <details>
-
 <summary>Fix SELinux issues with udica</summary>
 
 Rather than weakening SELinux modules for all workloads on your cluster, it's better to create a profile and apply it to a specific workload. The `udica` tool (pre-installed on MicroOS nodes) helps produce SELinux modules for running containers.

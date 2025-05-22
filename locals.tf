@@ -1105,18 +1105,17 @@ EOT
 # Generate config.yaml for each custom agent
 k3s_custom_agent_config_map = {
   for agent in var.custom_agent_nodepools : agent.name => <<-EOT
-    server: "https://${local.control_plane_external_api_endpoint}:6443"
-    token: "${local.k3s_token}"
-    node-external-ip: "${agent.external_ip}"
-    ${var.cni_plugin == "flannel" ? "flannel-backend: \"wireguard-native\"" : "flannel-backend: \"none\""}
-    node-label:
-    %{for label in agent.labels~}
-      - "${label}"
-    %{endfor~}
-    node-taint:
-    %{for taint in agent.taints~}
-      - "${taint}"
-    %{endfor~}
+"server": "https://${local.control_plane_external_api_endpoint}:6443"
+"token": "${local.k3s_token}"
+"node-external-ip": "${agent.external_ip}"
+node-label:
+%{for label in agent.labels~}
+  - "${label}"
+%{endfor~}
+node-taint:
+%{for taint in agent.taints~}
+  - "${taint}"
+%{endfor~}
   EOT
 }
 

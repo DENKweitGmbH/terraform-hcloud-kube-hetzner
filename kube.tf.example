@@ -306,25 +306,31 @@ module "kube-hetzner" {
   # enable_wireguard = true
 
   # The UDP port for WireGuard tunnels used by the CNI. This port is automatically opened on Hetzner firewalls when 
-  # custom_agent_nodepools is defined or enable_wireguard is true. Users must ensure this port is open on their custom agents.
+  # custom_agent_nodepools is defined or enable_wireguard is true. Users must ensure this port is open on their custom agents' firewalls.
+  # Terraform will not manage the custom agent's firewall.
   # wireguard_udp_port = 51820
 
-  # Enables integration of external/custom agent nodes from outside Hetzner cloud (multicloud).
+  # Enables automatic provisioning and integration of external/custom agent nodes from outside Hetzner cloud (multicloud).
   # Defining this list automatically enables multicloud mode and enforces secure CNI communication using WireGuard for all nodes.
+  # IMPORTANT: You must manually install wireguard-tools on your custom agent nodes before provisioning.
+  # Terraform will automatically provision these custom agent nodes via SSH using the credentials provided.
   # Note that for Cilium CNI, if custom_agent_nodepools is defined, routingMode will be forced to "tunnel" and 
   # WireGuard encryption will be enabled, regardless of cilium_routing_mode or enable_wireguard settings.
   # Example configuration:
   # custom_agent_nodepools = [
   #   {
-  #     name        = "gcp-agent"        # A unique name for the external agent
-  #     external_ip = "35.123.456.789"   # The public IP address of the custom agent machine
-  #     ssh_user    = "ubuntu"           # Optional: The SSH user for the custom machine (for user instructions)
-  #     ssh_port    = 22                 # Optional: The SSH port for the custom machine (for user instructions)
-  #     labels      = [                  # Optional: K3s node labels
+  #     name                 = "gcp-agent"        # A unique name for the external agent
+  #     external_ip          = "35.123.456.789"   # The public IP address of the custom agent machine
+  #     ssh_user             = "ubuntu"           # The SSH user for Terraform to connect to the custom machine for provisioning
+  #     ssh_port             = 22                 # Optional: The SSH port for Terraform to connect to the custom machine (default: 22)
+  #     ssh_private_key_path = "~/.ssh/gcp-key"   # Optional: Path to an SSH private key specifically for this custom agent
+  #     ssh_use_agent        = true               # Optional: Explicitly enable/disable SSH agent for this custom node
+  #     os_type              = "linux_debian_ubuntu" # Optional: Hint for OS type to determine package manager (default: "linux_debian_ubuntu")
+  #     labels               = [                  # Optional: K3s node labels
   #       "node.kubernetes.io/worker=true",
   #       "cloud.provider=gcp"
   #     ]
-  #     taints      = [                  # Optional: K3s node taints
+  #     taints               = [                  # Optional: K3s node taints
   #       "cloud.provider=gcp:NoSchedule"
   #     ]
   #   }

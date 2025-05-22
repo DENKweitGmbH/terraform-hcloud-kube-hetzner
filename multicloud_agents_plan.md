@@ -1,6 +1,6 @@
 Refactored Plan to Implement "Custom Agent Nodes" Feature (v2 - Automatic Provisioning)
 
-Core Principle: The presence of a non-empty `custom_agent_nodepools` list in the user's `kube.tf` will implicitly activate the "multicloud agents" feature, enforcing WireGuard for CNI communication. **Terraform will automatically provision these custom agent nodes via SSH.**
+Core Principle: The presence of a non-empty `custom_agent_nodepools` list in the user's `kube.tf` will implicitly activate the "multicloud agents" feature, enforcing WireGuard for CNI communication. **Terraform will automatically provision these custom agent nodes via SSH, but users must install WireGuard tools manually on their custom nodes before provisioning.**
 
 I. Introduce New Terraform Variables (in `variables.tf`)
 
@@ -17,7 +17,7 @@ I. Introduce New Terraform Variables (in `variables.tf`)
         *   `ssh_use_agent`: (bool, optional, default: null) Explicitly enable/disable SSH agent for this custom node. If null, behavior depends on `ssh_private_key_path` and global `var.ssh_private_key` / `local.ssh_agent_identity`.
         *   `labels`: (list(string), optional) K3s node labels.
         *   `taints`: (list(string), optional) K3s node taints.
-        *   `os_type`: (string, optional, default: "linux_debian_ubuntu") Hint for OS type to determine package manager commands for prerequisites (e.g., "linux_debian_ubuntu", "linux_rhel_centos"). Defaults to assuming apt for `wireguard-tools`.
+        *   `os_type`: (string, optional, default: "linux_debian_ubuntu") Hint for OS type to determine how to check for WireGuard tools installation (e.g., "linux_debian_ubuntu", "linux_rhel_centos"). **Note: Terraform will NOT install wireguard-tools - users must install it manually before provisioning.**
 
 2.  `wireguard_udp_port`:
     *   Type: `number`
@@ -151,26 +151,29 @@ V. Create `custom_agent_provisioning.tf` (New File or integrated into existing s
         *   `private_key`: `each.value.ssh_private_key_path != null ? file(each.value.ssh_private_key_path) : (var.ssh_private_key != "" && !coalesce(each.value.ssh_use_agent, local.ssh_agent_identity != null) ? var.ssh_private_key : null)`
         *   `agent_identity`: `coalesce(each.value.ssh_use_agent, local.ssh_agent_identity != null) ? (each.value.ssh_private_key_path != null ? file(each.value.ssh_private_key_path) : local.ssh_agent_identity) : null` (Note: `local.ssh_agent_identity` uses `var.ssh_public_key` as identity if `var.ssh_private_key` is null).
         *   `timeout`: e.g., "5m"
-    *   `provisioner "remote-exec"` (Install prerequisites like WireGuard tools - idempotent):
-        *   `inline`: Script based on `each.value.os_type`.
+    *   `provisioner "remote-exec"` (Check if WireGuard tools are installed - No automatic installation):
+        *   `inline`: Script that only checks for WireGuard tools installation.
           ```bash
-          # Example for Debian/Ubuntu
+          # Only check if wireguard-tools is installed - the user must install it manually
           if [ "${each.value.os_type}" = "linux_debian_ubuntu" ]; then
             if ! dpkg -s wireguard-tools > /dev/null 2>&1; then
-              echo "Installing wireguard-tools on ${each.value.name}..."
-              sudo apt-get update -y && sudo apt-get install -y wireguard-tools
+              echo "WARNING: wireguard-tools is NOT installed on ${each.value.name}."
+              echo "Please install it manually with: sudo apt-get update -y && sudo apt-get install -y wireguard-tools"
+              echo "CNI communication will not work without wireguard-tools installed."
             else
-              echo "Wireguard-tools already installed on ${each.value.name}."
+              echo "Wireguard-tools is installed on ${each.value.name}."
             fi
           elif [ "${each.value.os_type}" = "linux_rhel_centos" ]; then
             if ! rpm -q wireguard-tools > /dev/null 2>&1; then
-              echo "Installing wireguard-tools on ${each.value.name}..."
-              sudo yum install -y epel-release && sudo yum install -y wireguard-tools # Example, might need adjustment
+              echo "WARNING: wireguard-tools is NOT installed on ${each.value.name}."
+              echo "Please install it manually with: sudo yum install -y epel-release && sudo yum install -y wireguard-tools"
+              echo "CNI communication will not work without wireguard-tools installed."
             else
-              echo "Wireguard-tools already installed on ${each.value.name}."
+              echo "Wireguard-tools is installed on ${each.value.name}."
             fi
           else
-            echo "Skipping prerequisite installation for unknown OS type: ${each.value.os_type} on ${each.value.name}"
+            echo "Unable to check wireguard-tools installation for unknown OS type: ${each.value.os_type} on ${each.value.name}"
+            echo "Please ensure wireguard-tools is installed manually on this node."
           fi
           ```
     *   `provisioner "remote-exec"` (Create K3s directory):
@@ -258,6 +261,8 @@ VIII. Update `kube.tf.example`
 
 *   Update `custom_agent_nodepools` example to include `ssh_user` (as required) and demonstrate `ssh_port`, `ssh_private_key_path`, `ssh_use_agent`, `os_type`.
 *   Update comments to reflect automatic provisioning by Terraform and the need for SSH access from the Terraform host.
+*   **Add a CRITICAL PREREQUISITE section that clearly states users must install wireguard-tools manually on their custom agent machines before running Terraform.**
+*   Include examples of how to install wireguard-tools on different operating systems.
 *   Emphasize user responsibility for firewall rules on the custom agent machine itself.
 
 IX. Update `README.md`
@@ -266,6 +271,8 @@ IX. Update `README.md`
 *   Explain that provisioning is now automatic via SSH.
 *   Detail SSH requirements (key, user, port, network path from Terraform host to custom agents).
 *   Explain `ssh_private_key_path`, `ssh_use_agent`, and `os_type` options.
+*   **Emphasize that users MUST install WireGuard tools themselves on their custom agent machines before Terraform provisioning.**
+*   Provide OS-specific installation instructions for wireguard-tools (Ubuntu/Debian, CentOS/RHEL, etc.).
 *   Stress that the user must ensure the custom agent's firewall permits WireGuard UDP traffic.
 *   Reference `custom_agent_provisioning_status` output.
 
@@ -281,7 +288,7 @@ graph LR
         B --> C1[Modifies CP k3s config: adds --node-external-ip, --flannel-external-ip];
         B --> C2[Modifies Hetzner Agent k3s config: sets server to Public LB IP, adds --node-external-ip];
         B --> C3[**Terraform SSHes to Custom Agents & Provisions K3s Agent**];
-        C3 --> C3a[Installs wireguard-tools];
+        C3 --> C3a[Checks if wireguard-tools is installed (user must install manually)];
         C3 --> C3b[Creates /etc/rancher/k3s/config.yaml];
         C3 --> C3c[Runs K3s install script];
         C3 --> C3d[Starts k3s-agent service];

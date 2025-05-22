@@ -277,14 +277,17 @@ variable "agent_nodepools" {
 }
 
 variable "custom_agent_nodepools" {
-  description = "A list of objects defining pre-existing custom agent nodes to be integrated into the cluster. Defining this list automatically enables multicloud agent mode. Terraform will output configuration and installation scripts for these nodes."
+  description = "A list of objects defining pre-existing custom agent nodes to be **automatically provisioned and integrated** into the cluster. Defining this list automatically enables multicloud agent mode."
   type = list(object({
-    name        = string
-    external_ip = string
-    ssh_user    = optional(string)
-    ssh_port    = optional(number, 22)
-    labels      = optional(list(string), [])
-    taints      = optional(list(string), [])
+    name                 = string
+    external_ip          = string
+    ssh_user             = string
+    ssh_port             = optional(number, 22)
+    ssh_private_key_path = optional(string)
+    ssh_use_agent        = optional(bool)
+    labels               = optional(list(string), [])
+    taints               = optional(list(string), [])
+    os_type              = optional(string, "linux_debian_ubuntu")
   }))
   default = []
   validation {
