@@ -276,6 +276,39 @@ variable "agent_nodepools" {
 
 }
 
+variable "custom_agent_nodepools" {
+  description = "A list of objects defining pre-existing custom agent nodes to be integrated into the cluster. Defining this list automatically enables multicloud agent mode. Terraform will output configuration and installation scripts for these nodes."
+  type = list(object({
+    name        = string
+    external_ip = string
+    ssh_user    = optional(string)
+    ssh_port    = optional(number, 22)
+    labels      = optional(list(string), [])
+    taints      = optional(list(string), [])
+  }))
+  default = []
+  validation {
+    condition = length(
+      [for custom_agent_nodepool in var.custom_agent_nodepools : custom_agent_nodepool.name]
+      ) == length(
+      distinct(
+        [for custom_agent_nodepool in var.custom_agent_nodepools : custom_agent_nodepool.name]
+      )
+    )
+    error_message = "Names in custom_agent_nodepools must be unique."
+  }
+}
+
+variable "wireguard_udp_port" {
+  description = "The UDP port for WireGuard tunnels used by Flannel, Calico, or Cilium. This port is automatically opened on Hetzner firewalls when custom_agent_nodepools is defined or enable_wireguard is true. Users must ensure this port is open on their custom agents."
+  type        = number
+  default     = 51820
+  validation {
+    condition     = var.wireguard_udp_port >= 0 && var.wireguard_udp_port <= 65535
+    error_message = "The WireGuard UDP port must use a valid range from 0 to 65535."
+  }
+}
+
 variable "cluster_autoscaler_image" {
   type        = string
   default     = "registry.k8s.io/autoscaling/cluster-autoscaler"

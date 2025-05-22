@@ -49,7 +49,7 @@ locals {
   k3s-agent-config = { for k, v in local.agent_nodes : k => merge(
     {
       node-name = module.agents[k].name
-      server    = "https://${var.use_control_plane_lb ? hcloud_load_balancer_network.control_plane.*.ip[0] : module.control_planes[keys(module.control_planes)[0]].private_ipv4_address}:6443"
+      server    = local.enable_multicloud_agents ? "https://${local.control_plane_external_api_endpoint}:6443" : "https://${var.use_control_plane_lb ? hcloud_load_balancer_network.control_plane.*.ip[0] : module.control_planes[keys(module.control_planes)[0]].private_ipv4_address}:6443"
       token     = local.k3s_token
       kubelet-arg = concat(
         local.kubelet_arg,
@@ -62,6 +62,10 @@ locals {
       node-label    = v.labels
       node-taint    = v.taints
     },
+    # Add node-external-ip when multicloud is enabled
+    local.enable_multicloud_agents ? {
+      node-external-ip = module.agents[k].ipv4_address
+    } : {},
     var.agent_nodes_custom_config,
     # Force selinux=false if disable_selinux = true.
     var.disable_selinux

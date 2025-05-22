@@ -125,6 +125,11 @@ locals {
       cluster-dns                 = local.cluster_dns_ipv4
       write-kubeconfig-mode       = "0644" # needed for import into rancher
     },
+    # Add node-external-ip and flannel-external-ip when multicloud is enabled
+    local.enable_multicloud_agents ? {
+      node-external-ip    = module.control_planes[k].ipv4_address
+      flannel-external-ip = ""
+    } : {},
     lookup(local.cni_k3s_settings, var.cni_plugin, {}),
     var.use_control_plane_lb ? {
       tls-san = concat([

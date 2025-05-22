@@ -305,6 +305,31 @@ module "kube-hetzner" {
   # Just note, that if Cilium with cilium_values, the responsibility of enabling of disabling Wireguard falls on you.
   # enable_wireguard = true
 
+  # The UDP port for WireGuard tunnels used by the CNI. This port is automatically opened on Hetzner firewalls when 
+  # custom_agent_nodepools is defined or enable_wireguard is true. Users must ensure this port is open on their custom agents.
+  # wireguard_udp_port = 51820
+
+  # Enables integration of external/custom agent nodes from outside Hetzner cloud (multicloud).
+  # Defining this list automatically enables multicloud mode and enforces secure CNI communication using WireGuard for all nodes.
+  # Note that for Cilium CNI, if custom_agent_nodepools is defined, routingMode will be forced to "tunnel" and 
+  # WireGuard encryption will be enabled, regardless of cilium_routing_mode or enable_wireguard settings.
+  # Example configuration:
+  # custom_agent_nodepools = [
+  #   {
+  #     name        = "gcp-agent"        # A unique name for the external agent
+  #     external_ip = "35.123.456.789"   # The public IP address of the custom agent machine
+  #     ssh_user    = "ubuntu"           # Optional: The SSH user for the custom machine (for user instructions)
+  #     ssh_port    = 22                 # Optional: The SSH port for the custom machine (for user instructions)
+  #     labels      = [                  # Optional: K3s node labels
+  #       "node.kubernetes.io/worker=true",
+  #       "cloud.provider=gcp"
+  #     ]
+  #     taints      = [                  # Optional: K3s node taints
+  #       "cloud.provider=gcp:NoSchedule"
+  #     ]
+  #   }
+  # ]
+
   # * LB location and type, the latter will depend on how much load you want it to handle, see https://www.hetzner.com/cloud/load-balancer
   load_balancer_type     = "lb11"
   load_balancer_location = "fsn1"

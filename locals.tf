@@ -10,6 +10,21 @@ locals {
   # if given as a variable, we want to use the given token. This is needed to restore the cluster
   k3s_token = var.k3s_token == null ? random_password.k3s_token.result : var.k3s_token
 
+  # Determines if multicloud agents feature is enabled
+  enable_multicloud_agents = length(var.custom_agent_nodepools) > 0
+
+  # Determines if WireGuard should be forced for CNI (either explicitly enabled or required for multicloud)
+  force_wireguard_for_cni = var.enable_wireguard || local.enable_multicloud_agents
+
+  # Determines the public-facing API endpoint for agents when multicloud is enabled
+  control_plane_external_api_endpoint = local.enable_multicloud_agents ? (
+    var.kubeconfig_server_address != "" ? var.kubeconfig_server_address : (
+      var.use_control_plane_lb ?
+      hcloud_load_balancer.control_plane[0].ipv4 :
+      module.control_planes[keys(module.control_planes)[0]].ipv4_address
+    )
+  ) : null
+
   ccm_version    = var.hetzner_ccm_version != null ? var.hetzner_ccm_version : data.github_release.hetzner_ccm[0].release_tag
   csi_version    = length(data.github_release.hetzner_csi) == 0 ? var.hetzner_csi_version : data.github_release.hetzner_csi[0].release_tag
   kured_version  = var.kured_version != null ? var.kured_version : data.github_release.kured[0].release_tag
@@ -301,6 +316,17 @@ locals {
         source_ips  = ["0.0.0.0/0", "::/0"]
       },
     ] : [],
+    # Add rule for WireGuard if custom agents are used OR var.enable_wireguard is true
+    local.force_wireguard_for_cni ? [
+      {
+        description     = "Allow Inbound WireGuard UDP for k3s CNI"
+        direction       = "in"
+        protocol        = "udp"
+        port            = tostring(var.wireguard_udp_port)
+        source_ips      = ["0.0.0.0/0", "::/0"]
+        destination_ips = []
+      }
+    ] : [],
     var.firewall_kube_api_source == null ? [] : [
       {
         description = "Allow Incoming Requests to Kube API Server"
@@ -433,7 +459,7 @@ locals {
   cni_k3s_settings = {
     "flannel" = {
       disable-network-policy = var.disable_network_policy
-      flannel-backend        = var.enable_wireguard ? "wireguard-native" : "vxlan"
+      flannel-backend        = local.force_wireguard_for_cni ? "wireguard-native" : "vxlan"
     }
     "calico" = {
       disable-network-policy = true
@@ -476,27 +502,17 @@ k8sServiceHost: "127.0.0.1"
 k8sServicePort: "6444"
 
 # Set Tunnel Mode or Native Routing Mode (supported by Hetzner CCM Route Controller)
-routingMode: "${var.cilium_routing_mode}"
-%{if var.cilium_routing_mode == "native"~}
-# Set the native routable CIDR
-ipv4NativeRoutingCIDR: "${local.cilium_ipv4_native_routing_cidr}"
-
-# Bypass iptables Connection Tracking for Pod traffic (only works in Native Routing Mode)
-installNoConntrackIptablesRules: true
+routingMode: "${local.enable_multicloud_agents ? "tunnel" : var.cilium_routing_mode}"
+%{if local.enable_multicloud_agents && var.cilium_routing_mode != "tunnel"}
+tunnelType: "vxlan"
 %{endif~}
-
 endpointRoutes:
-  # Enable use of per endpoint routes instead of routing via the cilium_host interface.
-  enabled: true
-
+  enabled: ${var.cilium_routing_mode == "native" ? "true" : "false"}
 loadBalancer:
-  # Enable LoadBalancer & NodePort XDP Acceleration (direct routing (routingMode=native) is recommended to achieve optimal performance)
-  acceleration: native
-
+  acceleration: "native"
 bpf:
-  # Enable eBPF-based Masquerading ("The eBPF-based implementation is the most efficient implementation")
   masquerade: true
-%{if var.enable_wireguard}
+%{if local.force_wireguard_for_cni}
 encryption:
   enabled: true
   # Enable node encryption for node-to-node traffic
@@ -548,7 +564,7 @@ spec:
             - name: CALICO_IPV4POOL_CIDR
               value: "${var.cluster_ipv4_cidr}"
             - name: FELIX_WIREGUARDENABLED
-              value: "${var.enable_wireguard}"
+              value: "${local.force_wireguard_for_cni}"
 
   EOT
 
@@ -1085,4 +1101,29 @@ cloudinit_runcmd_common = <<EOT
 - [setenforce, '0']
 %{endif}
 EOT
+
+# Generate config.yaml for each custom agent
+k3s_custom_agent_config_map = {
+  for agent in var.custom_agent_nodepools : agent.name => <<-EOT
+    server: "https://${local.control_plane_external_api_endpoint}:6443"
+    token: "${local.k3s_token}"
+    node-external-ip: "${agent.external_ip}"
+    ${var.cni_plugin == "flannel" ? "flannel-backend: \"wireguard-native\"" : "flannel-backend: \"none\""}
+    node-label:
+    %{for label in agent.labels~}
+      - "${label}"
+    %{endfor~}
+    node-taint:
+    %{for taint in agent.taints~}
+      - "${taint}"
+    %{endfor~}
+  EOT
+}
+
+# Generate install script for each custom agent
+k3s_custom_agent_install_script_map = {
+  for agent in var.custom_agent_nodepools : agent.name => <<-EOT
+    curl -sfL https://get.k3s.io | %{if var.install_k3s_version == ""}INSTALL_K3S_CHANNEL=${var.initial_k3s_channel}%{else}INSTALL_K3S_VERSION=${var.install_k3s_version}%{endif} INSTALL_K3S_EXEC='agent ${var.k3s_exec_agent_args}' sh -
+  EOT
+}
 }
