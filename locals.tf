@@ -479,7 +479,7 @@ locals {
 
   kubelet_arg                 = ["cloud-provider=external", "volume-plugin-dir=/var/lib/kubelet/volumeplugins"]
   kube_controller_manager_arg = "flex-volume-plugin-dir=/var/lib/kubelet/volumeplugins"
-  flannel_iface               = "eth1"
+  flannel_iface               = local.enable_multicloud_agents ? null : "eth1"
 
   kube_apiserver_arg = var.authentication_config != "" ? ["authentication-config=/etc/rancher/k3s/authentication_config.yaml"] : []
 

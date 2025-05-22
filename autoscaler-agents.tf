@@ -114,7 +114,15 @@ data "cloudinit_config" "autoscaler_config" {
           node-taint    = concat(local.default_agent_taints, [for taint in var.autoscaler_nodepools[count.index].taints : "${taint.key}=${taint.value}:${taint.effect}"])
           selinux       = true
         })
-        install_k3s_agent_script     = join("\n", concat(local.install_k3s_agent, ["systemctl start k3s-agent"]))
+        install_k3s_agent_script = join("\n", concat(
+          local.enable_multicloud_agents ? [
+            "PUBLIC_IP=$(curl -sfL ifconfig.me || ip -4 addr show eth0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}' | head -n1)",
+            "PRIVATE_IP=$(ip -4 addr show eth1 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}' | head -n1)",
+            "export INSTALL_K3S_EXEC=\"agent ${var.k3s_exec_agent_args} --node-ip=$PRIVATE_IP --node-external-ip=$PUBLIC_IP\""
+          ] : [],
+          local.install_k3s_agent,
+          ["systemctl start k3s-agent"]
+        ))
         cloudinit_write_files_common = local.cloudinit_write_files_common
         cloudinit_runcmd_common      = local.cloudinit_runcmd_common
       }
@@ -148,7 +156,15 @@ data "cloudinit_config" "autoscaler_legacy_config" {
           node-taint    = concat(local.default_agent_taints, var.autoscaler_taints)
           selinux       = true
         })
-        install_k3s_agent_script     = join("\n", concat(local.install_k3s_agent, ["systemctl start k3s-agent"]))
+        install_k3s_agent_script = join("\n", concat(
+          local.enable_multicloud_agents ? [
+            "PUBLIC_IP=$(curl -sfL ifconfig.me || ip -4 addr show eth0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}' | head -n1)",
+            "PRIVATE_IP=$(ip -4 addr show eth1 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}' | head -n1)",
+            "export INSTALL_K3S_EXEC=\"agent ${var.k3s_exec_agent_args} --node-ip=$PRIVATE_IP --node-external-ip=$PUBLIC_IP\""
+          ] : [],
+          local.install_k3s_agent,
+          ["systemctl start k3s-agent"]
+        ))
         cloudinit_write_files_common = local.cloudinit_write_files_common
         cloudinit_runcmd_common      = local.cloudinit_runcmd_common
       }
